@@ -1,4 +1,392 @@
-    let activeGroup = 'bist'; // Varsayılan grup
+
+    // --- ORTAK GLOBAL VERİLER & SABİTLER ---
+    // Şirket veri yapısı örn: { ticker, name, group: "bist"|"sp"|"doviz"|"emtia"|"kripto", logourl, slug, unit }
+// --- CLOUDFLARE DATA URL ---
+    window.COMPANIES_DATA_URL = "https://finapsis-data.nameless-dream-696b.workers.dev/static/companies.min.v1.json";
+
+    // --- METRİKLER İÇİN AYARLAR ---
+    window.FIN_DATA_BASE = "https://finapsis-data.nameless-dream-696b.workers.dev";    
+    // Kısa kod (JSON) -> Uzun isim (Uygulama) Haritası
+    // Not: Hesaplananlar (mc, pe, pb vs.) burada yok, onlar kod içinde üretilecek.
+    // Kısa kod (JSON) -> Uzun isim (Uygulama) Haritası
+const METRIC_KEY_MAP = {
+    // Ham Veriler (WANT Listesinin TERSİ)
+    "sh": "Hisse Adedi", // Veya "Total Common Shares Outstanding"
+    "ev": "Firma Değeri",
+    "evs": "Gelir Çarpanı",
+    "eve": "FVÖK Çarpanı",
+    "cr": "Cari Oran",
+    "gm": "Brüt Kar Marjı",
+    "om": "Faaliyet Kâr Marjı",
+    "qr": "Asit Test Oranı",
+    "de": "Borç/Öz Kaynak",
+    "itr": "Stok Devir Hızı",
+    "itd": "Stok Süresi",
+    "rtr": "Alacak Devir Hızı",
+    "roic": "ROIC",
+    "roa": "ROA",
+    "roe": "ROE",
+    "ptr": "Borç Devir Hızı",
+    "rds": "Alacak Süresi",
+    "pds": "Borç Süresi",
+    "ccc": "Nakit Döngüsü",
+    "fcf": "Serbest Nakit Akışı",
+    "ni": "Dönem Karı (Zararı)",
+    "wacc": "WACC",
+    "ta": "Toplam Varlıklar",
+    "rev": "Satış Gelirleri",
+    "rg3y": "Satış Büyümesi 3Y",
+    "rgttm": "Satış Büyümesi TTM",
+    "opgttm": "Faaliyet Kar Büyümesi TTM",
+    "capex": "Varlık Alımları",
+    "rgnet": "Satış Büyümesi Net",
+    "cash": "Nakit ve Nakit Benzerleri",
+    "eq": "Ana Ortaklığa Ait Özkaynaklar",
+    "beta": "Beta"
+};
+
+    // Global Veri Yükleyici (Async)
+    // Global Veri Yükleyici (Şirketler + Fiyatlar)
+    async function loadFinapsisData() {
+        // İkisini paralel başlat (biri diğerini beklemesin)
+        const pCompanies = fetch(window.COMPANIES_DATA_URL);
+        
+        // Fiyatları artık R2'dan çekiyoruz (ÇOK HIZLI)
+// Fiyatları ve Göstergeleri paralel çekiyoruz
+        const pPrices = fetch(`${window.FIN_DATA_BASE}/price/detail.v1.json`);
+        const pIndMap = fetch(`${window.FIN_DATA_BASE}/indicators/indicatorsmap.json`);
+        const pIndSum = fetch(`${window.FIN_DATA_BASE}/indicators/summary.v1.json`);
+        
+
+        try {
+            const [resComp, resPrice, resIndMap, resIndSum] = await Promise.all([
+  pCompanies, pPrices, pIndMap, pIndSum
+]);
+
+// Gösterge Verilerini Global Değişkenlere Ata
+if (resIndMap.ok) window.__INDICATORS_MAP = await resIndMap.json();
+if (resIndSum.ok) {
+  const s = await resIndSum.json();
+
+  // ✅ Geriye dönük uyum:
+  // - eski format: Array
+  // - yeni format: { asOf, items }
+  if (Array.isArray(s)) {
+    window.__INDICATORS_SUMMARY = { asOf: null, items: s };
+  } else {
+    window.__INDICATORS_SUMMARY = {
+      asOf: s?.asOf || null,
+      items: Array.isArray(s?.items) ? s.items : []
+    };
+  }
+}
+
+
+// Artık last yok (geriye dönük kırılmasın diye boş bırakıyoruz)
+window.__INDICATORS_LAST = {};
+
+
+            if (resComp.ok) {
+                const data = await resComp.json();
+                window.companies = Array.isArray(data) ? data : (data.companies || []);
+            } else {
+                window.companies = [];
+            }
+
+            if (resPrice.ok) {
+                const rawDetail = await resPrice.json();
+                
+                // Yeni format: [{ asOf: "...", data: [...] }]
+                // Veri array içinde ilk elemanda geliyor
+                const detailList =
+  (rawDetail && Array.isArray(rawDetail.data)) ? rawDetail.data :
+  (Array.isArray(rawDetail) && rawDetail[0]?.data && Array.isArray(rawDetail[0].data)) ? rawDetail[0].data :
+  (Array.isArray(rawDetail)) ? rawDetail :
+  [];
+
+
+                window.currentPriceData = {};
+                window.prevPriceData = {};
+
+                // Map'i doldur ve window.__FIN_MAP içine de fiyatı enjekte et (Sıralama çalışsın diye)
+                window.__FIN_MAP = window.__FIN_MAP || {};
+
+                detailList.forEach(item => {
+                    if (item.ticker) {
+                        // 1. Ticker'ı temizle ve büyük harf yap (Eşleşme Garantisi)
+                        const t = String(item.ticker).trim().toUpperCase();
+                        const p = Number(item.price);
+                        const prev = Number(item.prev);
+
+                        // 2. Global Fiyatları Güncelle
+                        window.currentPriceData[t] = p;
+                        window.prevPriceData[t] = prev;
+
+                        // 3. Map Verisini Güncelle
+                        if(!window.__FIN_MAP[t]) window.__FIN_MAP[t] = {};
+                        const target = window.__FIN_MAP[t];
+                        
+                        target["price"] = p;
+                        target["prev"] = prev;
+
+                        // 4. KRİTİK: PİYASA DEĞERİ HESAPLAMA (Fix)
+                        // Eğer metrik verileri (Hisse Adedi) fiyattan önce indiyse, fiyat gelince MC'yi hemen hesapla.
+                        // Metriklerde hisse adedi 'sh', 'Hisse Adedi' veya 'Shares Outstanding' olarak gelebilir.
+                        const shares = target["Hisse Adedi"] || target["sh"] || target["Total Common Shares Outstanding"];
+                        
+                        if (p > 0 && shares > 0) {
+                            let finalShares = shares;
+                            // ADR kontrolü (varsa)
+                            if (window.__ADR_CACHE && window.__ADR_CACHE[t]) {
+                                finalShares = shares / window.__ADR_CACHE[t];
+                            }
+                            target["Piyasa Değeri"] = p * finalShares;
+                        }
+                    }
+                });
+                
+                console.log(`[DATA] ${detailList.length} detaylı fiyat yüklendi.`);
+                
+                // 5. ZORLA YENİLEME: Fiyatlar yüklendi, tabloyu hemen güncelle!
+                if (typeof window.renderCompanyList === "function") {
+                    window.renderCompanyList();
+                }
+            }
+
+        } catch (e) {
+            console.error("[DATA] Yükleme hatası:", e);
+            // Hata olsa bile uygulama açılsın
+            window.companies = window.companies || [];
+            window.currentPriceData = window.currentPriceData || {};
+        }
+    }
+
+window.__CALENDAR_LIST_RAW = window.__CALENDAR_LIST_RAW || `[
+  { "id": "101", "name": "ABD Tarım Dışı İstihdam", "country_code": "us", "date_full": "07 Şubat 2026 - 16:30", "timestamp": "2026-02-07T16:30:00", "impact": 3, "expected": "185K", "actual": "", "prev": "216K" },
+  { "id": "102", "name": "TCMB Faiz Kararı", "country_code": "tr", "date_full": "20 Şubat 2026 - 14:00", "timestamp": "2026-02-20T14:00:00", "impact": 3, "expected": "%45", "actual": "", "prev": "%42.5" },
+  { "id": "103", "name": "Euro Bölgesi TÜFE (Yıllık)", "country_code": "eu", "date_full": "15 Şubat 2026 - 13:00", "timestamp": "2026-02-15T13:00:00", "impact": 2, "expected": "%2.8", "actual": "", "prev": "%2.9" }
+]`
+window.__INDICATORS_RAW = window.__INDICATORS_RAW || ``;
+
+    // Fiyat verileri: { TICKER: price } formatında
+    window.currentPriceData = window.currentPriceData || {};
+    window.prevPriceData = window.prevPriceData || {};
+
+    // Portfolio API / Auth sabitleri
+    window.FINAPSIS_CONFIG = Object.assign({
+      BUBBLE_USER_ID: "",
+      BUBBLE_USER_NAME: "",
+      BUBBLE_API_TOKEN: "",
+      API_BASE: "https://eap-35848.bubbleapps.io/api/1.1/wf",
+      GOOGLE_CLIENT_ID: "",
+      REDIRECT_URI: "https://finapsis.co/portfolio/",
+      MIDAS_PROXY_URL: "https://unitplan.app.n8n.cloud/webhook/31d8bf64-8c6d-4573-9c4f-e947db8d7041",
+      PRICE_PROXY_URL: "https://script.google.com/macros/s/AKfycbwRt12DlJcWkIE5Vn3Cg8LLyDAhf7PYPeuzH9Do3FYfoMEukwhhDHav7e7IkLZna4cfIA/exec"
+    },
+    (window.FINAPSIS_CONFIG || {})
+  );
+    window.FINAPSIS_CONFIG.PRICE_PROXY_URL = "https://script.google.com/macros/s/AKfycbwRt12DlJcWkIE5Vn3Cg8LLyDAhf7PYPeuzH9Do3FYfoMEukwhhDHav7e7IkLZna4cfIA/exec";
+
+// ====== STABLE DATA LOADER (RESTORE + DECODE) ======
+
+function finDecodeHtmlEntities(s){
+  if (typeof s !== "string") return "";
+  if (!s.includes("&")) return s;
+  const ta = document.createElement("textarea");
+  ta.innerHTML = s;
+  return ta.value;
+}
+
+function finGetRawJson(raw, fallback="[]"){
+  return finDecodeHtmlEntities(String(raw ?? fallback)).trim();
+}
+
+function finEnsureCompanies(){
+  // Artık veri asenkron yükleniyor. 
+  // Eğer veri henüz gelmediyse boş dizi döndürür, uygulama patlamaz.
+  if (!window.companies) window.companies = [];
+}
+// ✅ YENİ: Göstergeler verisini hazırla
+function finEnsureIndicators(){
+  if (Array.isArray(window.indicators) && window.indicators.length) return;
+  try {
+    // Bubble HTML entity decode + JSON parse
+    window.indicators = JSON.parse(finGetRawJson(window.__INDICATORS_RAW, "[]"));
+  } catch(e){
+    console.error("indicators JSON.parse failed", e);
+    window.indicators = [];
+  }
+}
+
+function finEnsureBenchmarks(){
+  if (Array.isArray(window.benchmarks) && window.benchmarks.length) return;
+  try {
+    window.benchmarks = JSON.parse(finGetRawJson(window.__BENCHMARKS_RAW, "[]"));
+  } catch(e){
+    console.error("benchmarks JSON.parse failed", e);
+    window.benchmarks = [];
+  }
+}
+
+
+
+// Companies List için hızlı lookup map (ticker -> {type:value})
+window.__FIN_MAP = window.__FIN_MAP || Object.create(null);
+
+let __mapGroup = "";
+
+
+
+// --- YENİ MAP BUILDER (DRS.JSON OTO-HESAPLAMA) ---
+let __loadingMetrics = false;
+window.__ADR_CACHE = null; // ADR verisini hafızada tutmak için
+
+// ✅ Map yükleme sırasında gelen talepleri sıraya al
+window.__FIN_METRICS_WAITERS = window.__FIN_METRICS_WAITERS || [];
+
+// ✅ OPTİMİZE EDİLMİŞ MAP BUILDER (DOĞRU SAYFA SAYISI & PARALEL FETCH)
+async function finBuildMapForActiveGroup(done) {
+    // Kuyruğa ekle
+    if (typeof done === "function") window.__FIN_METRICS_WAITERS.push(done);
+    
+    // Zaten çalışıyorsa tekrar başlatma
+    if (__loadingMetrics) return; 
+    __loadingMetrics = true;
+
+    const g = String(window.activeGroup || "bist");
+
+    // 1. Map'i hazırla
+    window.__FIN_MAP = window.__FIN_MAP || {};
+    
+    // Aktif gruptaki tickerları performans için set'e al
+    const activeTickers = new Set(
+        (window.companies || [])
+        .filter(c => {
+            if (c.group === g) return true;
+            if ((g === 'nyse' || g === 'nasdaq') && c.group === 'sp') return true;
+            return false;
+        })
+        .map(c => String(c.ticker).trim().toUpperCase())
+    );
+
+    try {
+        console.time("VeriIndirme");
+
+        // A. ADR Verisini Çek (Cache yoksa)
+        if (!window.__ADR_CACHE) {
+            try {
+                const adrRes = await fetch(`${window.FIN_DATA_BASE}/static/drs.json`);
+                if (adrRes.ok) {
+                    const rawAdr = await adrRes.json();
+                    window.__ADR_CACHE = {};
+                    for (const [tick, ratioStr] of Object.entries(rawAdr)) {
+                        const parts = ratioStr.split(':');
+                        if (parts.length === 2) window.__ADR_CACHE[tick] = parseFloat(parts[1]) / parseFloat(parts[0]);
+                    }
+                }
+            } catch (e) { window.__ADR_CACHE = {}; }
+        }
+
+        // ---------------------------------------------------------
+        // B. SAYFA SAYISINI ÖĞREN (DÜZELTİLDİ: .page OKUNUYOR)
+        // ---------------------------------------------------------
+        let totalPages = 1;
+        try {
+            const stateRes = await fetch(`${window.FIN_DATA_BASE}/__state/metrics_v1.json?t=${Date.now()}`);
+            if (stateRes.ok) {
+                const stateData = await stateRes.json();
+                // ✅ DÜZELTME BURADA: Senin JSON yapın "page": 32 döndürüyor.
+                // 32 demek 0'dan 31'e kadar dosya var demek.
+                if (stateData.page) {
+                    totalPages = stateData.page; 
+                }
+            }
+        } catch (e) { 
+            console.warn("State okunamadı, varsayılan 1."); 
+        }
+
+        console.log(`[METRICS] Toplam ${totalPages} sayfa paralel indirilecek.`);
+
+        // ---------------------------------------------------------
+        // 🚀 PARALLEL FETCH (TURBO MODE)
+        // 32 dosyanın hepsine aynı anda istek atıyoruz.
+        // ---------------------------------------------------------
+        const fetchPromises = [];
+        for (let i = 0; i < totalPages; i++) {
+            const pageId = String(i).padStart(3, '0');
+            const pageUrl = `${window.FIN_DATA_BASE}/metrics/page/${pageId}.v1.json`;
+            
+            fetchPromises.push(
+                fetch(pageUrl)
+                    .then(res => res.ok ? res.json() : [])
+                    .catch(() => []) // Hata olursa zinciri kırma
+            );
+        }
+
+        // Tüm indirmelerin bitmesini bekle
+        const allPagesData = await Promise.all(fetchPromises);
+        
+        console.timeEnd("VeriIndirme");
+
+        // ---------------------------------------------------------
+        // VERİYİ İŞLEME (Senkron)
+        // ---------------------------------------------------------
+        allPagesData.flat().forEach(item => {
+            if (!item || !item.t) return;
+
+            const rawTicker = item.t;
+            const ticker = String(rawTicker).trim().toUpperCase();
+
+            // Sadece seçili borsadaki hisseleri hafızaya al
+            if (!activeTickers.has(ticker)) return;
+
+            if (!window.__FIN_MAP[ticker]) window.__FIN_MAP[ticker] = {};
+            const target = window.__FIN_MAP[ticker];
+            const vals = item.v || {};
+
+            // 1. Metrikleri Eşle
+            for (const [shortKey, val] of Object.entries(vals)) {
+                if (val === null) continue;
+                const longKey = METRIC_KEY_MAP[shortKey];
+                if (longKey) target[longKey] = val;
+            }
+
+            // 2. Kritik Hesaplamalar (Piyasa Değeri, F/K vb.)
+            const price = (window.currentPriceData && window.currentPriceData[ticker]) 
+                        ? Number(window.currentPriceData[ticker]) : 0;
+            
+            let shares = vals.sh;
+            if (shares && window.__ADR_CACHE && window.__ADR_CACHE[ticker]) {
+                shares = shares / window.__ADR_CACHE[ticker];
+            }
+
+            if (price > 0 && shares) {
+                const mc = price * shares;
+                target["Piyasa Değeri"] = mc; // ✅ Sıralama için gerekli
+
+                if (vals.ni) target["F/K"] = mc / vals.ni;
+                if (vals.rev) target["Fiyat/Satışlar"] = mc / vals.rev;
+                
+                if (vals.eq && vals.eq > 0) {
+                    target["PD/DD"] = mc / vals.eq;
+                } else if (vals.ta && vals.de !== undefined) {
+                    const equity = vals.ta / (1 + vals.de);
+                    if (equity > 0) target["PD/DD"] = mc / equity;
+                }
+            }
+        });
+
+    } catch (e) {
+        console.error("[METRICS] Kritik Hata:", e);
+    } finally {
+        __loadingMetrics = false;
+        // İndirme bitti, bekleyen çizim işlemlerini (render) başlat
+        const q = (window.__FIN_METRICS_WAITERS || []).splice(0);
+        q.forEach(fn => { try { fn(); } catch (e) {} });
+    }
+}
+
+let activeGroup = 'bist'; // Varsayılan grup
     window.activeGroup = activeGroup;
 
     // =====================
