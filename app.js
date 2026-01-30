@@ -244,6 +244,27 @@ window.__ADR_CACHE = null; // ADR verisini hafızada tutmak için
 // ✅ Map yükleme sırasında gelen talepleri sıraya al
 window.__FIN_METRICS_WAITERS = window.__FIN_METRICS_WAITERS || [];
 
+// EKLE: Concurrency limitli async map
+async function mapWithConcurrency(items, limit, worker) {
+  const results = new Array(items.length);
+  let idx = 0;
+
+  const runners = Array.from({ length: Math.max(1, limit) }, async () => {
+    while (idx < items.length) {
+      const i = idx++;
+      try {
+        results[i] = await worker(items[i], i);
+      } catch (e) {
+        results[i] = null;
+      }
+    }
+  });
+
+  await Promise.all(runners);
+  return results;
+}
+
+
 // ✅ OPTİMİZE EDİLMİŞ MAP BUILDER (DOĞRU SAYFA SAYISI & PARALEL FETCH)
 async function finBuildMapForActiveGroup(done) {
     // Kuyruğa ekle
@@ -308,25 +329,67 @@ async function finBuildMapForActiveGroup(done) {
         console.log(`[METRICS] Toplam ${totalPages} sayfa paralel indirilecek.`);
 
         // ---------------------------------------------------------
-        // 🚀 PARALLEL FETCH (TURBO MODE)
-        // 32 dosyanın hepsine aynı anda istek atıyoruz.
         // ---------------------------------------------------------
-        const fetchPromises = [];
-        for (let i = 0; i < totalPages; i++) {
-            const pageId = String(i).padStart(3, '0');
-            const pageUrl = `${window.FIN_DATA_BASE}/metrics/page/${pageId}.v1.json`;
-            
-            fetchPromises.push(
-                fetch(pageUrl)
-                    .then(res => res.ok ? res.json() : [])
-                    .catch(() => []) // Hata olursa zinciri kırma
-            );
-        }
+// ✅ CONTROLLED FETCH (CONCURRENCY LIMIT)
+// ---------------------------------------------------------
+const pageIds = [];
+for (let i = 0; i < totalPages; i++) pageIds.push(String(i).padStart(3, '0'));
 
-        // Tüm indirmelerin bitmesini bekle
-        const allPagesData = await Promise.all(fetchPromises);
-        
-        console.timeEnd("VeriIndirme");
+const CONCURRENCY = 6;
+
+// Sayfa geldikçe işle (memory şişmesin)
+await mapWithConcurrency(pageIds, CONCURRENCY, async (pageId) => {
+  const pageUrl = `${window.FIN_DATA_BASE}/metrics/page/${pageId}.v1.json`;
+  const res = await fetch(pageUrl);
+  if (!res.ok) return;
+
+  const arr = await res.json();
+  if (!Array.isArray(arr)) return;
+
+  // ✅ ESKİ allPagesData.flat().forEach(...) bloğunun içini aynen buraya taşıyoruz:
+  arr.forEach(item => {
+    if (!item || !item.t) return;
+
+    const ticker = String(item.t).trim().toUpperCase();
+    if (!activeTickers.has(ticker)) return;
+
+    if (!window.__FIN_MAP[ticker]) window.__FIN_MAP[ticker] = {};
+    const target = window.__FIN_MAP[ticker];
+    const vals = item.v || {};
+
+    for (const [shortKey, val] of Object.entries(vals)) {
+      if (val === null) continue;
+      const longKey = METRIC_KEY_MAP[shortKey];
+      if (longKey) target[longKey] = val;
+    }
+
+    const price = (window.currentPriceData && window.currentPriceData[ticker])
+      ? Number(window.currentPriceData[ticker]) : 0;
+
+    let shares = vals.sh;
+    if (shares && window.__ADR_CACHE && window.__ADR_CACHE[ticker]) {
+      shares = shares / window.__ADR_CACHE[ticker];
+    }
+
+    if (price > 0 && shares) {
+      const mc = price * shares;
+      target["Piyasa Değeri"] = mc;
+
+      if (vals.ni) target["F/K"] = mc / vals.ni;
+      if (vals.rev) target["Fiyat/Satışlar"] = mc / vals.rev;
+
+      if (vals.eq && vals.eq > 0) {
+        target["PD/DD"] = mc / vals.eq;
+      } else if (vals.ta && vals.de !== undefined) {
+        const equity = vals.ta / (1 + vals.de);
+        if (equity > 0) target["PD/DD"] = mc / equity;
+      }
+    }
+  });
+});
+
+console.timeEnd("VeriIndirme");
+
 
         // ---------------------------------------------------------
         // VERİYİ İŞLEME (Senkron)
