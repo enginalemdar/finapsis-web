@@ -391,53 +391,7 @@ await mapWithConcurrency(pageIds, CONCURRENCY, async (pageId) => {
 console.timeEnd("VeriIndirme");
 
 
-        // ---------------------------------------------------------
-        // VERİYİ İŞLEME (Senkron)
-        // ---------------------------------------------------------
-        allPagesData.flat().forEach(item => {
-            if (!item || !item.t) return;
-
-            const rawTicker = item.t;
-            const ticker = String(rawTicker).trim().toUpperCase();
-
-            // Sadece seçili borsadaki hisseleri hafızaya al
-            if (!activeTickers.has(ticker)) return;
-
-            if (!window.__FIN_MAP[ticker]) window.__FIN_MAP[ticker] = {};
-            const target = window.__FIN_MAP[ticker];
-            const vals = item.v || {};
-
-            // 1. Metrikleri Eşle
-            for (const [shortKey, val] of Object.entries(vals)) {
-                if (val === null) continue;
-                const longKey = METRIC_KEY_MAP[shortKey];
-                if (longKey) target[longKey] = val;
-            }
-
-            // 2. Kritik Hesaplamalar (Piyasa Değeri, F/K vb.)
-            const price = (window.currentPriceData && window.currentPriceData[ticker]) 
-                        ? Number(window.currentPriceData[ticker]) : 0;
-            
-            let shares = vals.sh;
-            if (shares && window.__ADR_CACHE && window.__ADR_CACHE[ticker]) {
-                shares = shares / window.__ADR_CACHE[ticker];
-            }
-
-            if (price > 0 && shares) {
-                const mc = price * shares;
-                target["Piyasa Değeri"] = mc; // ✅ Sıralama için gerekli
-
-                if (vals.ni) target["F/K"] = mc / vals.ni;
-                if (vals.rev) target["Fiyat/Satışlar"] = mc / vals.rev;
-                
-                if (vals.eq && vals.eq > 0) {
-                    target["PD/DD"] = mc / vals.eq;
-                } else if (vals.ta && vals.de !== undefined) {
-                    const equity = vals.ta / (1 + vals.de);
-                    if (equity > 0) target["PD/DD"] = mc / equity;
-                }
-            }
-        });
+      
 
     } catch (e) {
         console.error("[METRICS] Kritik Hata:", e);
